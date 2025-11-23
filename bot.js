@@ -9,12 +9,17 @@ class AIGroupManagerBot {
     this.bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, { polling: true });
     this.db = new Database();
     this.ai = new AIService();
-    this.setupStates = new Map(); // Track user setup states
     this.initializeBot();
   }
 
-  initializeBot() {
+  async initializeBot() {
     console.log('🤖 AI Group Manager Bot Starting...');
+    
+    // Wait for database to be ready
+    await this.waitForDatabase();
+    
+    // Restore setup states from database
+    await this.restoreSetupStates();
     
     // Command handlers
     this.bot.onText(/\/start/, (msg) => this.handleStart(msg));
@@ -35,6 +40,23 @@ class AIGroupManagerBot {
     this.bot.on('my_chat_member', (msg) => this.handleChatMemberUpdate(msg));
     
     console.log('✅ Bot initialized successfully!');
+  }
+
+  async waitForDatabase() {
+    // Wait for database to be fully initialized
+    let attempts = 0;
+    while (!this.db.db && attempts < 10) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      attempts++;
+    }
+    if (!this.db.db) {
+      throw new Error('Database initialization timeout');
+    }
+  }
+
+  async restoreSetupStates() {
+    // This is now handled by database lookups instead of memory
+    console.log('✅ Setup state restoration enabled (database-backed)');
   }
 
   async handleStart(msg) {
@@ -138,12 +160,10 @@ Please describe in 1-2 sentences.`;
 
       await this.bot.sendMessage(userId, privateMessage, { parse_mode: 'Markdown' });
       
-      // Set setup state
-      this.setupStates.set(userId, {
-        step: 'purpose',
-        groupId: parseInt(groupId),
-        data: {}
-      });
+      // Save setup state to database
+      await this.db.saveSetupState(userId, parseInt(groupId), 'purpose', {});
+      
+      console.log(`✅ Setup started for user ${userId}, group ${groupId}`);
     } else if (data.startsWith('confirm_')) {
       const [, action, messageId] = data.split('_');
       await this.handleAdminConfirmation(query, action, messageId);
@@ -162,9 +182,12 @@ Please describe in 1-2 sentences.`;
     if (!text) return;
 
     // Handle setup flow in private chat BEFORE checking for commands
-    if (chatType === 'private' && this.setupStates.has(userId)) {
-      await this.handleSetupFlow(msg);
-      return;
+    if (chatType === 'private') {
+      const setupState = await this.db.getSetupState(userId);
+      if (setupState) {
+        await this.handleSetupFlow(msg, setupState);
+        return;
+      }
     }
 
     // Skip if it's a command (after setup check)
@@ -176,67 +199,69 @@ Please describe in 1-2 sentences.`;
     }
   }
 
-  async handleSetupFlow(msg) {
+  async handleSetupFlow(msg, setupState) {
     const userId = msg.from.id;
     const text = msg.text;
-    const state = this.setupStates.get(userId);
 
-    if (!state) {
-      console.log('No setup state found for user:', userId);
+    if (!setupState) {
+      console.log('❌ No setup state found for user:', userId);
       return;
     }
 
-    console.log(`Setup flow - User: ${userId}, Step: ${state.step}, Message: ${text}`);
+    console.log(`📝 Setup flow - User: ${userId}, Step: ${setupState.step}, Message: ${text.substring(0, 50)}...`);
 
     try {
-      switch (state.step) {
+      switch (setupState.step) {
         case 'purpose':
-          state.data.purpose = text;
-          state.step = 'tone';
+          setupState.data.purpose = text;
+          await this.db.saveSetupState(userId, setupState.group_id, 'tone', setupState.data);
           await this.bot.sendMessage(
             userId,
             `Great! 👍\n\n**Question 2:** What tone should I use when responding?\n\n` +
             `Choose: "Professional", "Casual", "Friendly", or describe your preferred style.`,
             { parse_mode: 'Markdown' }
           );
+          console.log(`✅ User ${userId} completed step: purpose`);
           break;
 
         case 'tone':
-          state.data.tone = text;
-          state.step = 'rules';
+          setupState.data.tone = text;
+          await this.db.saveSetupState(userId, setupState.group_id, 'rules', setupState.data);
           await this.bot.sendMessage(
             userId,
             `Perfect! 📝\n\n**Question 3:** What are the main rules or guidelines for this group?\n\n` +
             `List them separated by commas, or type "None" if you don't have specific rules yet.`,
             { parse_mode: 'Markdown' }
           );
+          console.log(`✅ User ${userId} completed step: tone`);
           break;
 
         case 'rules':
-          state.data.rules = text.toLowerCase() !== 'none' ? text.split(',').map(r => r.trim()) : [];
-          state.step = 'triggers';
+          setupState.data.rules = text.toLowerCase() !== 'none' ? text.split(',').map(r => r.trim()) : [];
+          await this.db.saveSetupState(userId, setupState.group_id, 'triggers', setupState.data);
           await this.bot.sendMessage(
             userId,
             `Excellent! 🎯\n\n**Question 4:** When should I respond to messages?\n\n` +
             `Type keywords or phrases (comma-separated) that should trigger my responses, or type "all" to respond to all questions.`,
             { parse_mode: 'Markdown' }
           );
+          console.log(`✅ User ${userId} completed step: rules`);
           break;
 
         case 'triggers':
-          state.data.triggers = text.toLowerCase() === 'all' ? ['all'] : text.split(',').map(t => t.trim());
+          setupState.data.triggers = text.toLowerCase() === 'all' ? ['all'] : text.split(',').map(t => t.trim());
           
           // Save configuration
-          await this.db.updateGroupConfig(state.groupId, state.data);
+          await this.db.updateGroupConfig(setupState.group_id, setupState.data);
           
           const summary = `✅ **Setup Complete!**
 
 Your group is now configured:
 
-📋 **Purpose:** ${state.data.purpose}
-🎨 **Tone:** ${state.data.tone}
-📜 **Rules:** ${state.data.rules.length > 0 ? state.data.rules.join(', ') : 'None set'}
-🎯 **Triggers:** ${state.data.triggers.join(', ')}
+📋 **Purpose:** ${setupState.data.purpose}
+🎨 **Tone:** ${setupState.data.tone}
+📜 **Rules:** ${setupState.data.rules.length > 0 ? setupState.data.rules.join(', ') : 'None set'}
+🎯 **Triggers:** ${setupState.data.triggers.join(', ')}
 
 I'm now active in your group and learning! 🧠
 
@@ -252,12 +277,12 @@ I'm now active in your group and learning! 🧠
 I'll start learning from your group conversations and admin responses right away!`;
 
           await this.bot.sendMessage(userId, summary, { parse_mode: 'Markdown' });
-          this.setupStates.delete(userId);
-          console.log('Setup completed for user:', userId);
+          await this.db.deleteSetupState(userId);
+          console.log(`✅ Setup completed for user: ${userId}, group: ${setupState.group_id}`);
           break;
       }
     } catch (error) {
-      console.error('Error in setup flow:', error);
+      console.error('❌ Error in setup flow:', error);
       await this.bot.sendMessage(
         userId,
         '❌ Sorry, there was an error processing your response. Please try again or use /setup to restart.'
