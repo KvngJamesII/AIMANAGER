@@ -41,6 +41,19 @@ class Database {
       )
     `);
 
+    // Setup states table (NEW - for persistent setup tracking)
+    await this.db.exec(`
+      CREATE TABLE IF NOT EXISTS setup_states (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER UNIQUE NOT NULL,
+        group_id INTEGER NOT NULL,
+        step TEXT NOT NULL,
+        data TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     // Messages table
     await this.db.exec(`
       CREATE TABLE IF NOT EXISTS messages (
