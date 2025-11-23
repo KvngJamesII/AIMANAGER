@@ -131,7 +131,51 @@ class Database {
       CREATE INDEX IF NOT EXISTS idx_learned_responses_group ON learned_responses(group_id);
       CREATE INDEX IF NOT EXISTS idx_interactions_group ON interactions(group_id);
       CREATE INDEX IF NOT EXISTS idx_keywords_group ON keywords(group_id);
+      CREATE INDEX IF NOT EXISTS idx_setup_states_user ON setup_states(user_id);
     `);
+  }
+
+  // Setup state operations
+  async saveSetupState(userId, groupId, step, data = {}) {
+    try {
+      await this.db.run(`
+        INSERT INTO setup_states (user_id, group_id, step, data, updated_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id) 
+        DO UPDATE SET step = ?, data = ?, updated_at = CURRENT_TIMESTAMP
+      `, [userId, groupId, step, JSON.stringify(data), step, JSON.stringify(data)]);
+    } catch (error) {
+      console.error('Error saving setup state:', error);
+    }
+  }
+
+  async getSetupState(userId) {
+    try {
+      const state = await this.db.get(
+        'SELECT * FROM setup_states WHERE user_id = ?',
+        [userId]
+      );
+      
+      if (state && state.data) {
+        state.data = JSON.parse(state.data);
+      }
+      
+      return state;
+    } catch (error) {
+      console.error('Error getting setup state:', error);
+      return null;
+    }
+  }
+
+  async deleteSetupState(userId) {
+    try {
+      await this.db.run(
+        'DELETE FROM setup_states WHERE user_id = ?',
+        [userId]
+      );
+    } catch (error) {
+      console.error('Error deleting setup state:', error);
+    }
   }
 
   // Group operations
