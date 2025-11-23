@@ -323,20 +323,61 @@ Go to your group and use this command!`;
       const botUsername = botInfo.username;
 
       // Always respond if mentioned
-      if (msg.text.includes(`@${botUsername}`)) return true;
-
-      // Check if replying to bot
-      if (msg.reply_to_message && msg.reply_to_message.from.is_bot) return true;
-
-      // Check triggers
-      if (group.triggers && group.triggers.includes('all')) {
-        // Respond to questions only
-        if (text.includes('?')) return true;
+      if (msg.text.includes(`@${botUsername}`)) {
+        console.log('🎯 Responding: Bot was mentioned');
+        return true;
       }
 
-      // Check custom triggers
-      if (group.triggers) {
-        return group.triggers.some(trigger => text.includes(trigger.toLowerCase()));
+      // Check if replying to bot
+      if (msg.reply_to_message && msg.reply_to_message.from.is_bot) {
+        console.log('🎯 Responding: Reply to bot message');
+        return true;
+      }
+
+      // If triggers set to "all", use AI to intelligently decide
+      if (group.triggers && group.triggers.includes('all')) {
+        // Respond to questions
+        if (text.includes('?')) {
+          console.log('🎯 Responding: Question detected');
+          return true;
+        }
+        
+        // Respond to common question words (even without ?)
+        const questionWords = ['what', 'how', 'why', 'when', 'where', 'who', 'which', 'can', 'could', 'would', 'should', 'is', 'are', 'do', 'does'];
+        if (questionWords.some(word => text.startsWith(word + ' ') || text.includes(' ' + word + ' '))) {
+          console.log('🎯 Responding: Question word detected');
+          return true;
+        }
+
+        // Respond to help-seeking phrases
+        const helpPhrases = ['help', 'anyone know', 'anybody know', 'does anyone', 'can someone', 'please', 'need'];
+        if (helpPhrases.some(phrase => text.includes(phrase))) {
+          console.log('🎯 Responding: Help phrase detected');
+          return true;
+        }
+
+        // Use AI to check if message seems like it needs a response
+        if (text.length > 15 && text.split(' ').length > 3) {
+          // For longer messages, check if they're conversational
+          const conversationalWords = ['think', 'wondering', 'curious', 'recommend', 'suggestion', 'advice', 'opinion'];
+          if (conversationalWords.some(word => text.includes(word))) {
+            console.log('🎯 Responding: Conversational message detected');
+            return true;
+          }
+        }
+      }
+
+      // Check custom triggers (keywords)
+      if (group.triggers && group.triggers.length > 0) {
+        const hasKeyword = group.triggers.some(trigger => {
+          if (trigger === 'all') return false; // Skip 'all' here
+          return text.includes(trigger.toLowerCase());
+        });
+        
+        if (hasKeyword) {
+          console.log('🎯 Responding: Trigger keyword matched');
+          return true;
+        }
       }
 
       return false;
