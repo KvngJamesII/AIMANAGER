@@ -72,13 +72,15 @@ Ready to get started? Add me to your group now!`;
   }
 
   async handleChatMemberUpdate(msg) {
-    const botId = this.bot.options.polling.params.offset;
     const newStatus = msg.new_chat_member?.status;
     const chatId = msg.chat.id;
     const chatTitle = msg.chat.title;
 
+    // Get bot info
+    const botInfo = await this.bot.getMe();
+    
     // Check if bot was added to group
-    if (msg.new_chat_member?.user?.id === (await this.bot.getMe()).id) {
+    if (msg.new_chat_member?.user?.id === botInfo.id) {
       if (newStatus === 'administrator') {
         // Bot added as admin
         const keyboard = {
