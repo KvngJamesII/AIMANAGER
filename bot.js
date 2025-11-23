@@ -9,21 +9,20 @@ class AIGroupManagerBot {
     this.bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, { polling: true });
     this.db = new Database();
     this.ai = new AIService();
+    this.pendingSetups = new Map(); // Simple in-memory cache for active setups
     this.initializeBot();
   }
 
   async initializeBot() {
     console.log('🤖 AI Group Manager Bot Starting...');
     
-    // Wait for database to be ready
+    // Wait for database
     await this.waitForDatabase();
-    
-    // Restore setup states from database
-    await this.restoreSetupStates();
     
     // Command handlers
     this.bot.onText(/\/start/, (msg) => this.handleStart(msg));
-    this.bot.onText(/\/setup/, (msg) => this.handleSetup(msg));
+    this.bot.onText(/\/quicksetup (.+)/, (msg, match) => this.handleQuickSetup(msg, match));
+    this.bot.onText(/\/setup/, (msg) => this.handleSetupCommand(msg));
     this.bot.onText(/\/train (.+)/, (msg, match) => this.handleTrain(msg, match));
     this.bot.onText(/\/stats/, (msg) => this.handleStats(msg));
     this.bot.onText(/\/forget (.+)/, (msg, match) => this.handleForget(msg, match));
@@ -33,30 +32,24 @@ class AIGroupManagerBot {
     this.bot.onText(/\/resume/, (msg) => this.handleResume(msg));
     this.bot.onText(/\/export/, (msg) => this.handleExport(msg));
     
-    // Message handlers
-    this.bot.on('message', (msg) => this.handleMessage(msg));
-    this.bot.on('new_chat_members', (msg) => this.handleNewMember(msg));
+    // Message handlers - must be last
     this.bot.on('callback_query', (query) => this.handleCallbackQuery(query));
     this.bot.on('my_chat_member', (msg) => this.handleChatMemberUpdate(msg));
+    this.bot.on('new_chat_members', (msg) => this.handleNewMember(msg));
+    this.bot.on('message', (msg) => this.handleMessage(msg));
     
     console.log('✅ Bot initialized successfully!');
   }
 
   async waitForDatabase() {
-    // Wait for database to be fully initialized
     let attempts = 0;
-    while (!this.db.db && attempts < 10) {
+    while (!this.db.db && attempts < 20) {
       await new Promise(resolve => setTimeout(resolve, 500));
       attempts++;
     }
     if (!this.db.db) {
       throw new Error('Database initialization timeout');
     }
-  }
-
-  async restoreSetupStates() {
-    // This is now handled by database lookups instead of memory
-    console.log('✅ Setup state restoration enabled (database-backed)');
   }
 
   async handleStart(msg) {
@@ -72,12 +65,11 @@ I'm an intelligent bot that learns from your group to answer questions and manag
 1️⃣ Add me to your group
 2️⃣ Make me an admin (I need these permissions):
    • Delete messages
-   • Ban users
+   • Ban users  
    • Pin messages
    • Manage messages
 
-3️⃣ I'll send a confirmation message in the group
-4️⃣ Click "DONE" to complete setup
+3️⃣ I'll guide you through quick setup
 
 **What I can do:**
 🧠 Learn from admin responses
@@ -85,9 +77,8 @@ I'm an intelligent bot that learns from your group to answer questions and manag
 🛡️ Moderate content
 📊 Provide analytics
 👥 Welcome new members
-🎯 Remember group context
 
-Ready to get started? Add me to your group now!`;
+Ready? Add me to your group now!`;
 
       await this.bot.sendMessage(chatId, welcomeMessage, { parse_mode: 'Markdown' });
     }
@@ -98,76 +89,154 @@ Ready to get started? Add me to your group now!`;
     const chatId = msg.chat.id;
     const chatTitle = msg.chat.title;
 
-    // Get bot info
     const botInfo = await this.bot.getMe();
     
-    // Check if bot was added to group
     if (msg.new_chat_member?.user?.id === botInfo.id) {
       if (newStatus === 'administrator') {
-        // Bot added as admin
-        const keyboard = {
-          inline_keyboard: [[
-            { text: '✅ DONE - Complete Setup', callback_data: `setup_${msg.from.id}_${chatId}` }
-          ]]
-        };
-
-        await this.bot.sendMessage(
-          chatId,
-          `🎉 Thank you for adding me to **${chatTitle}**!\n\nAllow "Manager Bot" to manage your group?\n\n` +
-          `I need to be an admin to work properly. Once you're ready, click the button below to complete the setup in private chat.`,
-          { parse_mode: 'Markdown', reply_markup: keyboard }
-        );
-
-        // Save group to database
+        // Save group first
         await this.db.addGroup(chatId, chatTitle);
+        
+        const setupMsg = `🎉 Thank you for adding me to **${chatTitle}**!
+
+I'm ready to help manage your group. Let's do a quick 1-command setup!
+
+**Use this command to configure me:**
+\`/quicksetup Gaming community|Friendly|No spam, be respectful|all\`
+
+**Format:**
+\`/quicksetup [purpose]|[tone]|[rules]|[triggers]\`
+
+**Example:**
+\`/quicksetup Tech support group|Professional|No spam, stay on topic|help,question,?\`
+
+Or type \`/setup\` for detailed instructions.`;
+
+        await this.bot.sendMessage(chatId, setupMsg, { parse_mode: 'Markdown' });
+        
+        console.log(`✅ Bot added to group ${chatId} (${chatTitle})`);
       } else if (newStatus === 'member') {
         await this.bot.sendMessage(
           chatId,
-          `⚠️ I need admin permissions to work properly. Please make me an admin with the required permissions.`
+          `⚠️ I need admin permissions to work properly. Please make me an admin.`
         );
       }
     }
   }
 
-  async handleCallbackQuery(query) {
-    const data = query.data;
-    const chatId = query.message.chat.id;
+  async handleQuickSetup(msg, match) {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    const input = match[1];
 
-    if (data.startsWith('setup_')) {
-      const [, userId, groupId] = data.split('_');
-      
-      // Check if the person clicking is the one who added the bot
-      if (query.from.id.toString() !== userId) {
-        await this.bot.answerCallbackQuery(query.id, {
-          text: '❌ Only the person who added me can complete setup',
-          show_alert: true
-        });
+    // Only allow in groups
+    if (msg.chat.type === 'private') {
+      await this.bot.sendMessage(chatId, '❌ This command only works in groups!');
+      return;
+    }
+
+    // Check if user is admin
+    try {
+      const member = await this.bot.getChatMember(chatId, userId);
+      if (!['administrator', 'creator'].includes(member.status)) {
+        await this.bot.sendMessage(chatId, '❌ Only admins can configure the bot.');
         return;
       }
+    } catch (error) {
+      console.error('Error checking admin status:', error);
+      return;
+    }
 
-      await this.bot.answerCallbackQuery(query.id, {
-        text: '✅ Redirecting to private chat...'
-      });
+    // Parse setup data
+    const parts = input.split('|').map(p => p.trim());
+    
+    if (parts.length !== 4) {
+      await this.bot.sendMessage(
+        chatId,
+        `❌ Invalid format! Use:
+\`/quicksetup [purpose]|[tone]|[rules]|[triggers]\`
 
-      // Start setup in private chat
-      const privateMessage = `🔧 **Group Setup**
+Example:
+\`/quicksetup Gaming community|Friendly|No spam|all\``,
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
 
-Let's configure your group! I'll ask you a few questions to understand your group better.
+    const [purpose, tone, rulesStr, triggersStr] = parts;
+    const rules = rulesStr.toLowerCase() === 'none' ? [] : rulesStr.split(',').map(r => r.trim());
+    const triggers = triggersStr.toLowerCase() === 'all' ? ['all'] : triggersStr.split(',').map(t => t.trim());
 
-**Question 1:** What is your group mainly about? (e.g., "Tech support", "Gaming community", "Study group")
+    // Save configuration
+    await this.db.updateGroupConfig(chatId, {
+      purpose,
+      tone,
+      rules,
+      triggers
+    });
 
-Please describe in 1-2 sentences.`;
+    const summary = `✅ **Setup Complete!**
 
-      await this.bot.sendMessage(userId, privateMessage, { parse_mode: 'Markdown' });
-      
-      // Save setup state to database
-      await this.db.saveSetupState(userId, parseInt(groupId), 'purpose', {});
-      
-      console.log(`✅ Setup started for user ${userId}, group ${groupId}`);
-    } else if (data.startsWith('confirm_')) {
-      const [, action, messageId] = data.split('_');
-      await this.handleAdminConfirmation(query, action, messageId);
-    } else if (data.startsWith('feedback_')) {
+Your group is now configured:
+
+📋 **Purpose:** ${purpose}
+🎨 **Tone:** ${tone}
+📜 **Rules:** ${rules.length > 0 ? rules.join(', ') : 'None'}
+🎯 **Triggers:** ${triggers.join(', ')}
+
+I'm now active and learning! 🧠
+
+**Commands:**
+/train <question>|<answer> - Teach me
+/stats - View statistics
+/pause - Pause bot
+/help - Show all commands
+
+Try asking me a question!`;
+
+    await this.bot.sendMessage(chatId, summary, { parse_mode: 'Markdown' });
+    console.log(`✅ Quick setup completed for group ${chatId}`);
+  }
+
+  async handleSetupCommand(msg) {
+    const chatId = msg.chat.id;
+    
+    const instructions = `🔧 **Setup Instructions**
+
+Use the quick setup command in your group:
+
+\`/quicksetup [purpose]|[tone]|[rules]|[triggers]\`
+
+**Parameters:**
+
+1️⃣ **Purpose** - What your group is about
+   Example: "Gaming community", "Tech support"
+
+2️⃣ **Tone** - How I should communicate  
+   Example: "Friendly", "Professional", "Casual"
+
+3️⃣ **Rules** - Group rules (comma-separated)
+   Example: "No spam, Be respectful"
+   Or: "None"
+
+4️⃣ **Triggers** - When to respond
+   Example: "all" (respond to all questions)
+   Or: "help,question,?" (specific keywords)
+
+**Full Example:**
+\`/quicksetup Gaming community|Friendly|No spam, be nice|all\`
+
+**Another Example:**
+\`/quicksetup Tech support|Professional|Stay on topic|help,error,issue\`
+
+Go to your group and use this command!`;
+
+    await this.bot.sendMessage(chatId, instructions, { parse_mode: 'Markdown' });
+  }
+
+  async handleCallbackQuery(query) {
+    const data = query.data;
+
+    if (data.startsWith('feedback_')) {
       await this.handleFeedback(query);
     }
   }
@@ -178,115 +247,12 @@ Please describe in 1-2 sentences.`;
     const text = msg.text;
     const chatType = msg.chat.type;
 
-    // Skip if no text
-    if (!text) return;
+    // Skip if no text or if it's a command
+    if (!text || text.startsWith('/')) return;
 
-    // Handle setup flow in private chat BEFORE checking for commands
-    if (chatType === 'private') {
-      const setupState = await this.db.getSetupState(userId);
-      if (setupState) {
-        await this.handleSetupFlow(msg, setupState);
-        return;
-      }
-    }
-
-    // Skip if it's a command (after setup check)
-    if (text.startsWith('/')) return;
-
-    // Handle group messages
+    // Only handle group messages
     if (chatType === 'group' || chatType === 'supergroup') {
       await this.handleGroupMessage(msg);
-    }
-  }
-
-  async handleSetupFlow(msg, setupState) {
-    const userId = msg.from.id;
-    const text = msg.text;
-
-    if (!setupState) {
-      console.log('❌ No setup state found for user:', userId);
-      return;
-    }
-
-    console.log(`📝 Setup flow - User: ${userId}, Step: ${setupState.step}, Message: ${text.substring(0, 50)}...`);
-
-    try {
-      switch (setupState.step) {
-        case 'purpose':
-          setupState.data.purpose = text;
-          await this.db.saveSetupState(userId, setupState.group_id, 'tone', setupState.data);
-          await this.bot.sendMessage(
-            userId,
-            `Great! 👍\n\n**Question 2:** What tone should I use when responding?\n\n` +
-            `Choose: "Professional", "Casual", "Friendly", or describe your preferred style.`,
-            { parse_mode: 'Markdown' }
-          );
-          console.log(`✅ User ${userId} completed step: purpose`);
-          break;
-
-        case 'tone':
-          setupState.data.tone = text;
-          await this.db.saveSetupState(userId, setupState.group_id, 'rules', setupState.data);
-          await this.bot.sendMessage(
-            userId,
-            `Perfect! 📝\n\n**Question 3:** What are the main rules or guidelines for this group?\n\n` +
-            `List them separated by commas, or type "None" if you don't have specific rules yet.`,
-            { parse_mode: 'Markdown' }
-          );
-          console.log(`✅ User ${userId} completed step: tone`);
-          break;
-
-        case 'rules':
-          setupState.data.rules = text.toLowerCase() !== 'none' ? text.split(',').map(r => r.trim()) : [];
-          await this.db.saveSetupState(userId, setupState.group_id, 'triggers', setupState.data);
-          await this.bot.sendMessage(
-            userId,
-            `Excellent! 🎯\n\n**Question 4:** When should I respond to messages?\n\n` +
-            `Type keywords or phrases (comma-separated) that should trigger my responses, or type "all" to respond to all questions.`,
-            { parse_mode: 'Markdown' }
-          );
-          console.log(`✅ User ${userId} completed step: rules`);
-          break;
-
-        case 'triggers':
-          setupState.data.triggers = text.toLowerCase() === 'all' ? ['all'] : text.split(',').map(t => t.trim());
-          
-          // Save configuration
-          await this.db.updateGroupConfig(setupState.group_id, setupState.data);
-          
-          const summary = `✅ **Setup Complete!**
-
-Your group is now configured:
-
-📋 **Purpose:** ${setupState.data.purpose}
-🎨 **Tone:** ${setupState.data.tone}
-📜 **Rules:** ${setupState.data.rules.length > 0 ? setupState.data.rules.join(', ') : 'None set'}
-🎯 **Triggers:** ${setupState.data.triggers.join(', ')}
-
-I'm now active in your group and learning! 🧠
-
-**Available Commands:**
-/train <question>|<answer> - Teach me a specific response
-/stats - View bot performance
-/forget <keyword> - Remove learned information
-/pause - Pause learning temporarily
-/resume - Resume learning
-/export - Export learned knowledge
-/help - Show all commands
-
-I'll start learning from your group conversations and admin responses right away!`;
-
-          await this.bot.sendMessage(userId, summary, { parse_mode: 'Markdown' });
-          await this.db.deleteSetupState(userId);
-          console.log(`✅ Setup completed for user: ${userId}, group: ${setupState.group_id}`);
-          break;
-      }
-    } catch (error) {
-      console.error('❌ Error in setup flow:', error);
-      await this.bot.sendMessage(
-        userId,
-        '❌ Sorry, there was an error processing your response. Please try again or use /setup to restart.'
-      );
     }
   }
 
@@ -298,7 +264,10 @@ I'll start learning from your group conversations and admin responses right away
 
     // Get group config
     const group = await this.db.getGroup(chatId);
-    if (!group || !group.setup_complete) return;
+    if (!group || !group.setup_complete) {
+      // Group not configured yet
+      return;
+    }
 
     // Check if bot is paused
     if (group.paused) return;
@@ -310,14 +279,23 @@ I'll start learning from your group conversations and admin responses right away
     const shouldRespond = await this.shouldRespond(msg, group);
     if (!shouldRespond) return;
 
-    // Get user info
-    const userInfo = await this.bot.getChatMember(chatId, userId);
-    const isAdmin = ['administrator', 'creator'].includes(userInfo.status);
+    // Show typing indicator
+    await this.bot.sendChatAction(chatId, 'typing');
 
-    // If admin is responding, learn from it
-    if (isAdmin && msg.reply_to_message) {
-      const originalMessage = msg.reply_to_message.text;
-      await this.learnFromAdmin(chatId, originalMessage, text);
+    // Get user info
+    try {
+      const userInfo = await this.bot.getChatMember(chatId, userId);
+      const isAdmin = ['administrator', 'creator'].includes(userInfo.status);
+
+      // If admin is responding to a message, learn from it
+      if (isAdmin && msg.reply_to_message) {
+        const originalMessage = msg.reply_to_message.text;
+        if (originalMessage) {
+          await this.learnFromAdmin(chatId, originalMessage, text);
+        }
+      }
+    } catch (error) {
+      console.log('Could not check admin status:', error.message);
     }
 
     // Check for learned response first
@@ -339,22 +317,33 @@ I'll start learning from your group conversations and admin responses right away
 
   async shouldRespond(msg, group) {
     const text = msg.text.toLowerCase();
-    const botUsername = (await this.bot.getMe()).username;
+    
+    try {
+      const botInfo = await this.bot.getMe();
+      const botUsername = botInfo.username;
 
-    // Always respond if mentioned
-    if (msg.text.includes(`@${botUsername}`)) return true;
+      // Always respond if mentioned
+      if (msg.text.includes(`@${botUsername}`)) return true;
 
-    // Check if replying to bot
-    if (msg.reply_to_message && msg.reply_to_message.from.is_bot) return true;
+      // Check if replying to bot
+      if (msg.reply_to_message && msg.reply_to_message.from.is_bot) return true;
 
-    // Check triggers
-    if (group.triggers.includes('all')) return true;
+      // Check triggers
+      if (group.triggers && group.triggers.includes('all')) {
+        // Respond to questions only
+        if (text.includes('?')) return true;
+      }
 
-    // Check for question marks
-    if (text.includes('?')) return true;
+      // Check custom triggers
+      if (group.triggers) {
+        return group.triggers.some(trigger => text.includes(trigger.toLowerCase()));
+      }
 
-    // Check custom triggers
-    return group.triggers.some(trigger => text.includes(trigger.toLowerCase()));
+      return false;
+    } catch (error) {
+      console.error('Error in shouldRespond:', error);
+      return false;
+    }
   }
 
   async generateAIResponse(msg, group) {
@@ -364,17 +353,15 @@ I'll start learning from your group conversations and admin responses right away
 
     try {
       // Get group context
-      const context = await this.db.getGroupContext(chatId);
-      const recentMessages = await this.db.getRecentMessages(chatId, 10);
+      const recentMessages = await this.db.getRecentMessages(chatId, 5);
 
       // Build context for AI
       const systemContext = `You are a helpful AI assistant for a Telegram group.
 Group Purpose: ${group.purpose}
 Tone: ${group.tone}
 Rules: ${group.rules ? group.rules.join(', ') : 'None'}
-Recent context: ${recentMessages.map(m => m.content).join('\n')}
 
-Answer the user's question naturally and helpfully. Keep responses concise and relevant.`;
+Answer the user's question naturally and helpfully. Keep responses concise (under 200 words).`;
 
       // Get AI response
       const aiResponse = await this.ai.getResponse(text, systemContext);
@@ -398,7 +385,7 @@ Answer the user's question naturally and helpfully. Keep responses concise and r
 
   async learnFromAdmin(chatId, question, answer) {
     await this.db.addLearnedResponse(chatId, question, answer, 'admin');
-    console.log(`📚 Learned from admin: ${question.substring(0, 50)}...`);
+    console.log(`📚 Learned from admin: Q: "${question.substring(0, 30)}..." A: "${answer.substring(0, 30)}..."`);
   }
 
   async addFeedbackButtons(chatId, messageId, responseId) {
@@ -416,7 +403,7 @@ Answer the user's question naturally and helpfully. Keep responses concise and r
           message_id: messageId
         });
       } catch (error) {
-        // Ignore errors (message might be too old)
+        // Ignore errors
       }
     }, 1000);
   }
@@ -425,7 +412,7 @@ Answer the user's question naturally and helpfully. Keep responses concise and r
     const [, sentiment, id] = query.data.split('_');
     
     await this.bot.answerCallbackQuery(query.id, {
-      text: sentiment === 'good' ? '✅ Thanks for feedback!' : '👎 Noted, I\'ll improve!'
+      text: sentiment === 'good' ? '✅ Thanks!' : '👎 I\'ll improve!'
     });
 
     // Update confidence score
@@ -434,24 +421,26 @@ Answer the user's question naturally and helpfully. Keep responses concise and r
     }
 
     // Remove buttons
-    await this.bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
-      chat_id: query.message.chat.id,
-      message_id: query.message.message_id
-    });
+    try {
+      await this.bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+        chat_id: query.message.chat.id,
+        message_id: query.message.message_id
+      });
+    } catch (error) {
+      // Ignore
+    }
   }
 
   async handleNewMember(msg) {
     const chatId = msg.chat.id;
     const group = await this.db.getGroup(chatId);
     
-    if (!group) return;
+    if (!group || !group.setup_complete) return;
 
     const newMembers = msg.new_chat_members;
     for (const member of newMembers) {
       if (!member.is_bot) {
-        const welcomeMsg = `👋 Welcome ${member.first_name} to ${msg.chat.title}!\n\n` +
-          `${group.purpose}\n\nFeel free to ask me anything!`;
-        
+        const welcomeMsg = `👋 Welcome ${member.first_name}!\n\n${group.purpose}`;
         await this.bot.sendMessage(chatId, welcomeMsg);
       }
     }
@@ -463,9 +452,13 @@ Answer the user's question naturally and helpfully. Keep responses concise and r
     const input = match[1];
 
     // Check if user is admin
-    const member = await this.bot.getChatMember(chatId, userId);
-    if (!['administrator', 'creator'].includes(member.status)) {
-      await this.bot.sendMessage(chatId, '❌ Only admins can use this command.');
+    try {
+      const member = await this.bot.getChatMember(chatId, userId);
+      if (!['administrator', 'creator'].includes(member.status)) {
+        await this.bot.sendMessage(chatId, '❌ Only admins can use this command.');
+        return;
+      }
+    } catch (error) {
       return;
     }
 
@@ -474,7 +467,8 @@ Answer the user's question naturally and helpfully. Keep responses concise and r
     if (parts.length !== 2) {
       await this.bot.sendMessage(
         chatId,
-        '❌ Invalid format. Use: /train question|answer'
+        '❌ Invalid format. Use: `/train question|answer`',
+        { parse_mode: 'Markdown' }
       );
       return;
     }
@@ -482,14 +476,16 @@ Answer the user's question naturally and helpfully. Keep responses concise and r
     const [question, answer] = parts.map(p => p.trim());
     await this.db.addLearnedResponse(chatId, question, answer, 'manual');
     
-    await this.bot.sendMessage(chatId, `✅ Learned! I'll now respond with that answer when asked: "${question}"`);
+    await this.bot.sendMessage(chatId, `✅ Learned! I'll respond to: "${question}"`);
   }
 
   async handleStats(msg) {
     const chatId = msg.chat.id;
-    const stats = await this.db.getGroupStats(chatId);
+    
+    try {
+      const stats = await this.db.getGroupStats(chatId);
 
-    const statsMessage = `📊 **Bot Statistics**
+      const statsMessage = `📊 **Bot Statistics**
 
 💬 Total Messages: ${stats.totalMessages}
 🤖 Bot Responses: ${stats.botResponses}
@@ -497,10 +493,13 @@ Answer the user's question naturally and helpfully. Keep responses concise and r
 👥 Active Users: ${stats.activeUsers}
 📈 Accuracy: ${stats.accuracy}%
 
-Most common topics:
-${stats.topTopics.map((t, i) => `${i + 1}. ${t.topic} (${t.count} times)`).join('\n')}`;
+${stats.topTopics.length > 0 ? 'Most common topics:\n' + stats.topTopics.map((t, i) => `${i + 1}. ${t.topic} (${t.count}x)`).join('\n') : ''}`;
 
-    await this.bot.sendMessage(chatId, statsMessage, { parse_mode: 'Markdown' });
+      await this.bot.sendMessage(chatId, statsMessage, { parse_mode: 'Markdown' });
+    } catch (error) {
+      console.error('Error getting stats:', error);
+      await this.bot.sendMessage(chatId, '❌ Error retrieving statistics.');
+    }
   }
 
   async handleForget(msg, match) {
@@ -508,40 +507,40 @@ ${stats.topTopics.map((t, i) => `${i + 1}. ${t.topic} (${t.count} times)`).join(
     const userId = msg.from.id;
     const keyword = match[1];
 
-    const member = await this.bot.getChatMember(chatId, userId);
-    if (!['administrator', 'creator'].includes(member.status)) {
-      await this.bot.sendMessage(chatId, '❌ Only admins can use this command.');
+    try {
+      const member = await this.bot.getChatMember(chatId, userId);
+      if (!['administrator', 'creator'].includes(member.status)) {
+        await this.bot.sendMessage(chatId, '❌ Only admins can use this command.');
+        return;
+      }
+    } catch (error) {
       return;
     }
 
     const deleted = await this.db.forgetLearnedData(chatId, keyword);
-    await this.bot.sendMessage(chatId, `✅ Forgot ${deleted} learned response(s) containing "${keyword}"`);
+    await this.bot.sendMessage(chatId, `✅ Forgot ${deleted} response(s) containing "${keyword}"`);
   }
 
   async handleHelp(msg) {
-    const helpMessage = `🤖 **AI Group Manager Bot - Commands**
+    const helpMessage = `🤖 **AI Group Manager Bot**
+
+**Setup:**
+\`/quicksetup [purpose]|[tone]|[rules]|[triggers]\`
+\`/setup\` - Show setup instructions
 
 **Admin Commands:**
-/train <question>|<answer> - Teach me a response
-/forget <keyword> - Remove learned data
-/stats - View statistics
-/pause - Pause learning
-/resume - Resume learning
-/export - Export knowledge
-/privacy - Privacy settings
+\`/train <q>|<a>\` - Teach response
+\`/forget <keyword>\` - Remove data
+\`/stats\` - View statistics
+\`/pause\` - Pause bot
+\`/resume\` - Resume bot
+\`/export\` - Export data
 
-**General Commands:**
-/help - Show this message
-/setup - Reconfigure bot
+**General:**
+\`/help\` - This message
+\`/privacy\` - Privacy info
 
-**What I Do:**
-🧠 Learn from conversations
-💬 Answer questions
-🛡️ Moderate content
-📊 Provide insights
-👥 Welcome members
-
-I'm always learning! React to my messages with 👍 or 👎 to help me improve.`;
+React with 👍/👎 to help me learn!`;
 
     await this.bot.sendMessage(msg.chat.id, helpMessage, { parse_mode: 'Markdown' });
   }
@@ -550,9 +549,13 @@ I'm always learning! React to my messages with 👍 or 👎 to help me improve.`
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
-    const member = await this.bot.getChatMember(chatId, userId);
-    if (!['administrator', 'creator'].includes(member.status)) {
-      await this.bot.sendMessage(chatId, '❌ Only admins can use this command.');
+    try {
+      const member = await this.bot.getChatMember(chatId, userId);
+      if (!['administrator', 'creator'].includes(member.status)) {
+        await this.bot.sendMessage(chatId, '❌ Only admins can use this.');
+        return;
+      }
+    } catch (error) {
       return;
     }
 
@@ -564,9 +567,13 @@ I'm always learning! React to my messages with 👍 or 👎 to help me improve.`
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
-    const member = await this.bot.getChatMember(chatId, userId);
-    if (!['administrator', 'creator'].includes(member.status)) {
-      await this.bot.sendMessage(chatId, '❌ Only admins can use this command.');
+    try {
+      const member = await this.bot.getChatMember(chatId, userId);
+      if (!['administrator', 'creator'].includes(member.status)) {
+        await this.bot.sendMessage(chatId, '❌ Only admins can use this.');
+        return;
+      }
+    } catch (error) {
       return;
     }
 
@@ -583,14 +590,12 @@ I'm always learning! React to my messages with 👍 or 👎 to help me improve.`
 - Interaction statistics
 
 **Your Rights:**
-- Use /forget to delete specific data
-- Use /export to download your data
-- Messages are stored encrypted
-- Data is never shared with third parties
+- Use /forget to delete data
+- Use /export to download data
+- Data stored locally
+- 90 day retention
 
-**Retention:** 90 days by default
-
-Contact admin to request full data deletion.`;
+Contact admin for data deletion.`;
 
     await this.bot.sendMessage(msg.chat.id, privacyMsg, { parse_mode: 'Markdown' });
   }
@@ -599,35 +604,25 @@ Contact admin to request full data deletion.`;
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
-    const member = await this.bot.getChatMember(chatId, userId);
-    if (!['administrator', 'creator'].includes(member.status)) {
-      await this.bot.sendMessage(chatId, '❌ Only admins can use this command.');
+    try {
+      const member = await this.bot.getChatMember(chatId, userId);
+      if (!['administrator', 'creator'].includes(member.status)) {
+        await this.bot.sendMessage(chatId, '❌ Only admins can use this.');
+        return;
+      }
+    } catch (error) {
       return;
     }
 
     const data = await this.db.exportGroupData(chatId);
-    const filename = `group_${chatId}_export_${Date.now()}.json`;
+    const filename = `group_${chatId}_export.json`;
     
     await this.bot.sendDocument(chatId, Buffer.from(JSON.stringify(data, null, 2)), {
-      caption: '📦 Here\'s your exported data'
+      caption: '📦 Your exported data'
     }, {
       filename: filename,
       contentType: 'application/json'
     });
-  }
-
-  async handleSetup(msg) {
-    const chatId = msg.chat.id;
-    
-    if (msg.chat.type !== 'private') {
-      await this.bot.sendMessage(chatId, '⚠️ Please use this command in private chat with me.');
-      return;
-    }
-
-    await this.bot.sendMessage(
-      chatId,
-      '🔧 To setup or reconfigure a group, please add me to the group first, then make me an admin.'
-    );
   }
 }
 
