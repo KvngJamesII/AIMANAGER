@@ -158,14 +158,17 @@ Please describe in 1-2 sentences.`;
     const text = msg.text;
     const chatType = msg.chat.type;
 
-    // Skip if no text or if it's a command
-    if (!text || text.startsWith('/')) return;
+    // Skip if no text
+    if (!text) return;
 
-    // Handle setup flow in private chat
+    // Handle setup flow in private chat BEFORE checking for commands
     if (chatType === 'private' && this.setupStates.has(userId)) {
       await this.handleSetupFlow(msg);
       return;
     }
+
+    // Skip if it's a command (after setup check)
+    if (text.startsWith('/')) return;
 
     // Handle group messages
     if (chatType === 'group' || chatType === 'supergroup') {
@@ -178,44 +181,55 @@ Please describe in 1-2 sentences.`;
     const text = msg.text;
     const state = this.setupStates.get(userId);
 
-    switch (state.step) {
-      case 'purpose':
-        state.data.purpose = text;
-        state.step = 'tone';
-        await this.bot.sendMessage(
-          userId,
-          `Great! 👍\n\n**Question 2:** What tone should I use when responding?\n\n` +
-          `Choose: "Professional", "Casual", "Friendly", or describe your preferred style.`
-        );
-        break;
+    if (!state) {
+      console.log('No setup state found for user:', userId);
+      return;
+    }
 
-      case 'tone':
-        state.data.tone = text;
-        state.step = 'rules';
-        await this.bot.sendMessage(
-          userId,
-          `Perfect! 📝\n\n**Question 3:** What are the main rules or guidelines for this group?\n\n` +
-          `List them separated by commas, or type "None" if you don't have specific rules yet.`
-        );
-        break;
+    console.log(`Setup flow - User: ${userId}, Step: ${state.step}, Message: ${text}`);
 
-      case 'rules':
-        state.data.rules = text.toLowerCase() !== 'none' ? text.split(',').map(r => r.trim()) : [];
-        state.step = 'triggers';
-        await this.bot.sendMessage(
-          userId,
-          `Excellent! 🎯\n\n**Question 4:** When should I respond to messages?\n\n` +
-          `Type keywords or phrases (comma-separated) that should trigger my responses, or type "all" to respond to all questions.`
-        );
-        break;
+    try {
+      switch (state.step) {
+        case 'purpose':
+          state.data.purpose = text;
+          state.step = 'tone';
+          await this.bot.sendMessage(
+            userId,
+            `Great! 👍\n\n**Question 2:** What tone should I use when responding?\n\n` +
+            `Choose: "Professional", "Casual", "Friendly", or describe your preferred style.`,
+            { parse_mode: 'Markdown' }
+          );
+          break;
 
-      case 'triggers':
-        state.data.triggers = text.toLowerCase() === 'all' ? ['all'] : text.split(',').map(t => t.trim());
-        
-        // Save configuration
-        await this.db.updateGroupConfig(state.groupId, state.data);
-        
-        const summary = `✅ **Setup Complete!**
+        case 'tone':
+          state.data.tone = text;
+          state.step = 'rules';
+          await this.bot.sendMessage(
+            userId,
+            `Perfect! 📝\n\n**Question 3:** What are the main rules or guidelines for this group?\n\n` +
+            `List them separated by commas, or type "None" if you don't have specific rules yet.`,
+            { parse_mode: 'Markdown' }
+          );
+          break;
+
+        case 'rules':
+          state.data.rules = text.toLowerCase() !== 'none' ? text.split(',').map(r => r.trim()) : [];
+          state.step = 'triggers';
+          await this.bot.sendMessage(
+            userId,
+            `Excellent! 🎯\n\n**Question 4:** When should I respond to messages?\n\n` +
+            `Type keywords or phrases (comma-separated) that should trigger my responses, or type "all" to respond to all questions.`,
+            { parse_mode: 'Markdown' }
+          );
+          break;
+
+        case 'triggers':
+          state.data.triggers = text.toLowerCase() === 'all' ? ['all'] : text.split(',').map(t => t.trim());
+          
+          // Save configuration
+          await this.db.updateGroupConfig(state.groupId, state.data);
+          
+          const summary = `✅ **Setup Complete!**
 
 Your group is now configured:
 
@@ -237,9 +251,17 @@ I'm now active in your group and learning! 🧠
 
 I'll start learning from your group conversations and admin responses right away!`;
 
-        await this.bot.sendMessage(userId, summary, { parse_mode: 'Markdown' });
-        this.setupStates.delete(userId);
-        break;
+          await this.bot.sendMessage(userId, summary, { parse_mode: 'Markdown' });
+          this.setupStates.delete(userId);
+          console.log('Setup completed for user:', userId);
+          break;
+      }
+    } catch (error) {
+      console.error('Error in setup flow:', error);
+      await this.bot.sendMessage(
+        userId,
+        '❌ Sorry, there was an error processing your response. Please try again or use /setup to restart.'
+      );
     }
   }
 
