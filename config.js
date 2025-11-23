@@ -9,7 +9,7 @@ module.exports = {
   AI_API_KEY: process.env.AI_API_KEY || '',
 
   // Bot Configuration
-  BOT_USERNAME: process.env.BOT_USERNAME || 'AIGroupManagerBot',
+  BOT_USERNAME: process.env.BOT_USERNAME || 'AIC5GroupManagerBot',
   
   // Learning Configuration
   LEARNING_ENABLED: process.env.LEARNING_ENABLED !== 'false',
